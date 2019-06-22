@@ -1,0 +1,77 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(magrittr)
+library(purrr)
+library(jsonlite)
+library(stringr)
+```
+
+
+
+```{r}
+raw_data = list.files(pattern = "2017") %>%
+  readLines() %>%
+  str_split_fixed(pattern = ":", n = 2)
+
+```
+
+```{r}
+
+parse_json_to_df = function(json) {
+  stopifnot(is_character(json))
+  
+  json %>%
+    fromJSON() # and make 'flatten' works fine
+
+}
+
+
+
+parse_event = function(event, fields = NULL) {
+  event %<>% parse_json_to_df()
+  
+  try({
+    event$event = parse_json_to_df(event$event)
+  })
+  
+  event %<>%
+    unlist() %>%
+    as.list() %>%
+    as.data.frame(stringsAsFactors = FALSE)
+  
+  
+  if (!is.null(fields)) {
+    event = tryCatch({
+      event[, fields, drop = F]
+    },
+    error = function(err) {
+      
+      NULL
+      
+    })
+    
+    
+  }
+  
+  event
+}
+
+
+safely_parse_event = safely(parse_event)
+
+
+
+```
+
+
+
+
+
+
+
+
+
