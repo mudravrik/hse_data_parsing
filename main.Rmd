@@ -25,15 +25,28 @@ raw_data = list.files(pattern = "2017") %>%
 
 ```{r}
 
-# extract report as one-row df, allows to filter selected fields by dots notation like event.user_id
+create_filter_function = function(user_expression){
+  function(report){
+    eval(parse(text = user_expression), report)
+  }
+}
+
+
+event_type_filter = create_filter_function("event_type == 'edx.course.enrollment.activated'")
+
+# below "report" means valid json part from one row, 
+# took that name to avoid confusion with "event" field 
+# function extract report as one-row df, 
+# it allows to preserve selected fields by dots notation like event.user_id
 # returns NULL if report does not have all required fields
-parse_report = function(report, fields = NULL) {
-  
+parse_report = function(report,
+                        required_fields = NULL,
+                        user_filter = NULL) {
   report %<>% fromJSON()
   
   # some reports have nested (?) json in "event" object
   
-  try({ 
+  try({
     report$event = fromJSON(report$event)
   }, silent = TRUE)
   
@@ -42,14 +55,13 @@ parse_report = function(report, fields = NULL) {
     as.list() %>%
     as.data.frame(stringsAsFactors = FALSE)
   
-  # preserve only reports with full set of reqired fields
+  # preserve only reports with full set of required fields
   
-  if (!is.null(fields)) {
+  if (!is.null(required_fields)) {
     report = tryCatch({
-      report[, fields, drop = F]
+      report[, required_fields, drop = F]
     },
     error = function(err) {
-      
       NULL
       
     })
@@ -57,16 +69,37 @@ parse_report = function(report, fields = NULL) {
     
   }
   
-  event
+  # return report if filter succeded
+  
+  if (!is.null(user_filter)) {
+    report = tryCatch({
+      if (user_filter(report)) {
+        report
+      } else {
+        NULL
+      }
+    },
+    error = function(err) {
+      NULL
+    })
+  }
+  
+  report
 }
 
 
 # even more safety - rerunning map() over 1m elements is not fun =\
-safely_parse_report= safely(parse_report, quiet = TRUE)
+safely_parse_report = safely(parse_report, quiet = TRUE)
 
 
 
 ```
+
+
+```{r}
+safely_parse_report(raw_data[1,2], user_filter = "fuck")
+```
+
 
 
 ```{r}
@@ -77,7 +110,7 @@ plan(multisession)
 
 system.time(
   future_map(raw_data[1:10000,2],
-             safely_parse_event
+             safely_parse_report
              )
   )
 
@@ -86,7 +119,7 @@ plan(sequential)
 
 system.time(
   map(raw_data[1:10000,2],
-             safely_parse_event
+             safely_parse_report
              )
   )
 
@@ -100,7 +133,7 @@ plan(multisession)
 
 # actually without fields we can get parsed list of all event and subset it later for both output table
 # but i suppose it gonna bottleneck future_* function due to coping it into workers 
-parsed_data = future_map(raw_data[,2], safely_parse_event, c("context.user_id","event.id","event_type","time"))
+parsed_data = future_map(raw_data[,2], safely_parse_report, c("context.user_id","event.id","event_type","time"))
   
 # check for some unexpected errors 
 # feels like future here goes into some RAM bottlneck with 3.5gb parsed_list
@@ -155,7 +188,7 @@ write.csv(parsed_video_event_df,
 `
 
 ```{r}
-raw_data[324299,2] %>% fromJSON()
+raw_data[324299,2]
 ```
 
 
