@@ -8,45 +8,45 @@ library(magrittr)
 library(purrr)
 library(jsonlite)
 library(stringr)
+library(furrr)
 ```
 
 
 
 ```{r}
+# Neither jsonlite::fromJSON nor tidyjson::read_json(format = "jsonl") can deal with this format
+# so gonna read it by lines
+# Also it can speed us up due to possible parallel parsing
 raw_data = list.files(pattern = "2017") %>%
-  readLines() %>%
+  readLines() %>%                             
   str_split_fixed(pattern = ":", n = 2)
 
 ```
 
 ```{r}
 
-parse_json_to_df = function(json) {
-  stopifnot(is_character(json))
+# extract report as one-row df, allows to filter selected fields by dots notation like event.user_id
+# returns NULL if report does not have all required fields
+parse_report = function(report, fields = NULL) {
   
-  json %>%
-    fromJSON() # and make 'flatten' works fine
-
-}
-
-
-
-parse_event = function(event, fields = NULL) {
-  event %<>% parse_json_to_df()
+  report %<>% fromJSON()
   
-  try({
-    event$event = parse_json_to_df(event$event)
-  })
+  # some reports have nested (?) json in "event" object
   
-  event %<>%
+  try({ 
+    report$event = fromJSON(report$event)
+  }, silent = TRUE)
+  
+  report %<>%
     unlist() %>%
     as.list() %>%
     as.data.frame(stringsAsFactors = FALSE)
   
+  # preserve only reports with full set of reqired fields
   
   if (!is.null(fields)) {
-    event = tryCatch({
-      event[, fields, drop = F]
+    report = tryCatch({
+      report[, fields, drop = F]
     },
     error = function(err) {
       
@@ -61,11 +61,105 @@ parse_event = function(event, fields = NULL) {
 }
 
 
-safely_parse_event = safely(parse_event)
+# even more safety - rerunning map() over 1m elements is not fun =\
+safely_parse_report= safely(parse_report, quiet = TRUE)
 
 
 
 ```
+
+
+```{r}
+
+# Let`s check if we can sace some time with multiprocessing
+
+plan(multisession)
+
+system.time(
+  future_map(raw_data[1:10000,2],
+             safely_parse_event
+             )
+  )
+
+
+plan(sequential)
+
+system.time(
+  map(raw_data[1:10000,2],
+             safely_parse_event
+             )
+  )
+
+
+```
+
+
+
+```{r}
+plan(multisession)
+
+# actually without fields we can get parsed list of all event and subset it later for both output table
+# but i suppose it gonna bottleneck future_* function due to coping it into workers 
+parsed_data = future_map(raw_data[,2], safely_parse_event, c("context.user_id","event.id","event_type","time"))
+  
+# check for some unexpected errors 
+# feels like future here goes into some RAM bottlneck with 3.5gb parsed_list
+
+errors_list = parsed_data %>%
+  future_map(~.x %>%
+               extract2("error")) 
+
+errors_list %>%
+  future_map_lgl(is_null) %>%
+  table()
+
+parsed_video_event_df = parsed_data %>%
+  future_map_dfr(., ~.x %>%
+                   extract2("result"))
+
+```
+
+```{r}
+
+# just to avoid copy-pasting :)
+parsed_video_event_df$event_type %>%
+  unique() %>%
+  dput()
+
+
+# select mentioned in https://edx.readthedocs.io/projects/devdata/en/stable/internal_data_formats/tracking_logs.html#video-interaction-events types
+
+video_related_event_types = c("load_video",
+                              "pause_video",
+                              "play_video",
+                              "stop_video",
+                              "seek_video",
+                              "speed_change_video",
+                              "show_transcript",
+                              "hide_transcript"
+)
+
+
+parsed_video_event_df %<>% extract(.$event_type %in% video_related_event_types,)
+
+
+
+write.csv(parsed_video_event_df,
+          "video_events.csv",
+          col.names = T,
+          row.names = F)
+
+
+```
+
+`
+
+```{r}
+raw_data[324299,2] %>% fromJSON()
+```
+
+
+
 
 
 
