@@ -4,6 +4,7 @@ output: html_notebook
 ---
 
 ```{r}
+library(dplyr)
 library(magrittr)
 library(purrr)
 library(jsonlite)
@@ -24,39 +25,44 @@ raw_data = list.files(pattern = "2017") %>%
 ```
 
 ```{r}
-
+# create filter function to apply to report inside parsing process
+# user_expresion should be valid R expression resulting in logical()
 create_filter_function = function(user_expression){
+  #TODO add function testing 
   function(report){
     eval(parse(text = user_expression), report)
   }
+  
 }
 
-
-event_type_filter = create_filter_function("event_type == 'edx.course.enrollment.activated'")
-
-# below "report" means valid json part from one row, 
+# Below "report" means valid json part from one row, 
 # took that name to avoid confusion with "event" field 
-# function extract report as one-row df, 
-# it allows to preserve selected fields by dots notation like event.user_id
-# returns NULL if report does not have all required fields
+# Function extract report from input json, 
+# @param unnest_to_df is useful for flat data without nested arrays and staff
+# @param require_fileds preserve selected fields by dots notation like event.user_id
+#   returns NULL if report does not have all required fields
+# @ user_filter takes function from create_filter_function() to filter reports
 parse_report = function(report,
+                        unnest_to_df = FALSE,
                         required_fields = NULL,
                         user_filter = NULL) {
   report %<>% fromJSON()
   
   # some reports have nested (?) json in "event" object
-  
+  #TODO not only event can be nested json, make unnesting user-controlled
   try({
     report$event = fromJSON(report$event)
   }, silent = TRUE)
   
-  report %<>%
+  if(unnest_to_df){
+      report %<>%
     unlist() %>%
     as.list() %>%
     as.data.frame(stringsAsFactors = FALSE)
+  }
   
   # preserve only reports with full set of required fields
-  
+  # tons of "undefine column" error are expected, so just tryCatch it to NULL 
   if (!is.null(required_fields)) {
     report = tryCatch({
       report[, required_fields, drop = F]
@@ -70,18 +76,13 @@ parse_report = function(report,
   }
   
   # return report if filter succeded
-  
+  # error here are not so expected and gonna be catched by safely()
   if (!is.null(user_filter)) {
-    report = tryCatch({
-      if (user_filter(report)) {
-        report
-      } else {
-        NULL
-      }
-    },
-    error = function(err) {
-      NULL
-    })
+    
+    if (!user_filter(report)) {
+        report = NULL
+      } 
+
   }
   
   report
@@ -97,14 +98,8 @@ safely_parse_report = safely(parse_report, quiet = TRUE)
 
 
 ```{r}
-safely_parse_report(raw_data[1,2], user_filter = "fuck")
-```
 
-
-
-```{r}
-
-# Let`s check if we can sace some time with multiprocessing
+# Let`s check if we can save some time with multiprocessing
 
 plan(multisession)
 
@@ -131,12 +126,11 @@ system.time(
 ```{r}
 plan(multisession)
 
-# actually without fields we can get parsed list of all event and subset it later for both output table
-# but i suppose it gonna bottleneck future_* function due to coping it into workers 
-parsed_data = future_map(raw_data[,2], safely_parse_report, c("context.user_id","event.id","event_type","time"))
+# actually without fields arg we can get parsed list of all event and subset it later for both output table
+# but i suppose it gonna bottleneck future_* function due to coping HUGE object into workers 
+parsed_data = future_map(raw_data[,2], safely_parse_report, TRUE, c("context.user_id","event.id","event_type","time"))
   
 # check for some unexpected errors 
-# feels like future here goes into some RAM bottlneck with 3.5gb parsed_list
 
 errors_list = parsed_data %>%
   future_map(~.x %>%
@@ -146,10 +140,13 @@ errors_list %>%
   future_map_lgl(is_null) %>%
   table()
 
+# no errors, going on
+
 parsed_video_event_df = parsed_data %>%
   future_map_dfr(., ~.x %>%
                    extract2("result"))
 
+plan(sequential)
 ```
 
 ```{r}
@@ -159,7 +156,8 @@ parsed_video_event_df$event_type %>%
   unique() %>%
   dput()
 
-
+# get some other, non-video events with the specified field set
+# so clear ot out
 # select mentioned in https://edx.readthedocs.io/projects/devdata/en/stable/internal_data_formats/tracking_logs.html#video-interaction-events types
 
 video_related_event_types = c("load_video",
@@ -179,7 +177,6 @@ parsed_video_event_df %<>% extract(.$event_type %in% video_related_event_types,)
 
 write.csv(parsed_video_event_df,
           "video_events.csv",
-          col.names = T,
           row.names = F)
 
 
@@ -188,10 +185,65 @@ write.csv(parsed_video_event_df,
 `
 
 ```{r}
-raw_data[324299,2]
+# https://edx.readthedocs.io/projects/devdata/en/stable/internal_data_formats/tracking_logs.html#problem-check-server
+# browser-sourced event contain hard-to-parse http-requests and duplicate data so screw them
+server_problem_check_type_filter = create_filter_function("event_type == 'problem_check' & event_source == 'server'")
+
+plan(multisession)
+
+
+problem_check_data = future_map(raw_data[,2],
+                  ~safely_parse_report(.x, FALSE, NULL, server_problem_check_type_filter))
+ 
+# check for some unexpected errors 
+
+errors_list = problem_check_data %>%
+  future_map(~.x %>%
+               extract2("error")) 
+
+errors_list %>%
+  future_map_lgl(is_null) %>%
+  table()
+
+plan(sequential)
+
 ```
 
+```{r}
 
+# problem_check events are slightly more complicated with multiple questions and answer inside
+# so the function below designed to extract data from it to a pretty df
+
+extract_submission_data_from_check = function(parsed_report){
+  stopifnot(parsed_report$event_type == 'problem_check' & parsed_report$event_source == 'server')
+  
+  tmp = map(parsed_report$event$submission,
+            ~.x[c("question", "answer")]) %>%
+    map(data.frame, stringsAsFactors = F) %>%
+    bind_rows()
+    
+    tmp$user_id = parsed_report$context$user_id
+    tmp$problem_id = parsed_report$event$problem_id
+    tmp$time = parsed_report$time
+
+    tmp[,c( "user_id", "problem_id","question", "answer", "time")]
+  
+  }
+```
+ 
+
+```{r}
+
+problem_check_data = problem_check_data[map_lgl(problem_check_data, ~!is.null(.x$result))]
+
+parsed_problem_check_data_df = map_dfr(problem_check_data,
+                                    ~extract_submission_data_from_check(.x$result))
+
+write.csv(parsed_problem_check_data_df,
+          "problem_check_events.csv",
+          row.names = F)
+
+```
 
 
 
