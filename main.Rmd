@@ -1,6 +1,6 @@
 ---
-title: "R Notebook"
-output: html_notebook
+title: "EdX data parsing"
+author: "Ivan Tsarev, mudravr@gmail.com"
 ---
 
 ```{r}
@@ -11,8 +11,6 @@ library(jsonlite)
 library(stringr)
 library(furrr)
 ```
-
-
 
 ```{r}
 # Neither jsonlite::fromJSON nor tidyjson::read_json(format = "jsonl") can deal with this format
@@ -88,14 +86,10 @@ parse_report = function(report,
   report
 }
 
-
 # even more safety - rerunning map() over 1m elements is not fun =\
 safely_parse_report = safely(parse_report, quiet = TRUE)
 
-
-
 ```
-
 
 ```{r}
 
@@ -118,10 +112,7 @@ system.time(
              )
   )
 
-
 ```
-
-
 
 ```{r}
 plan(multisession)
@@ -147,6 +138,7 @@ parsed_video_event_df = parsed_data %>%
                    extract2("result"))
 
 plan(sequential)
+
 ```
 
 ```{r}
@@ -179,10 +171,7 @@ write.csv(parsed_video_event_df,
           "video_events.csv",
           row.names = F)
 
-
 ```
-
-`
 
 ```{r}
 # https://edx.readthedocs.io/projects/devdata/en/stable/internal_data_formats/tracking_logs.html#problem-check-server
@@ -228,10 +217,10 @@ extract_submission_data_from_check = function(parsed_report){
 
     tmp[,c( "user_id", "problem_id","question", "answer", "time")]
   
-  }
+}
+
 ```
  
-
 ```{r}
 
 problem_check_data = problem_check_data[map_lgl(problem_check_data, ~!is.null(.x$result))]
@@ -244,13 +233,3 @@ write.csv(parsed_problem_check_data_df,
           row.names = F)
 
 ```
-
-
-
-
-
-
-
-
-
-
